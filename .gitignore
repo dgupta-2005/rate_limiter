@@ -1,0 +1,18 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment Variables & Secrets (CRITICAL)
+.env
+.env.*
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS / Editor junk
+.DS_Store
+.vscode/
