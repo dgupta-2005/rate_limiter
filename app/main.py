@@ -9,7 +9,11 @@ app = FastAPI(title="Rate Limiter Core")
 # Enable CORS for React frontend (allow exposed headers so frontend can read them)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://main.d16wktw391ay2s.amplifyapp.com",
+        "http://localhost:5173",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

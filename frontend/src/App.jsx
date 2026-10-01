@@ -113,7 +113,7 @@ export default function App() {
   const executePing = async () => {
     try {
       const currentAlgo = algo;
-      const res = await fetch('http://127.0.0.1:8000/api/ping', {
+      const res = await fetch('https://rate-limiter-api.duckdns.org/api/ping', {
         method: 'GET',
         headers: {
           'X-Algorithm': currentAlgo,
