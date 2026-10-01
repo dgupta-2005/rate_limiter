@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from app.middleware import RateLimiterMiddleware, token_bucket, sliding_window
+from app.middleware import RateLimiterMiddleware, token_bucket, sliding_window, redis_client
 from typing import Optional
 
 app = FastAPI(title="Rate Limiter Core")
@@ -47,6 +47,12 @@ def ping(x_algorithm: Optional[str] = Header(default="token_bucket", description
 def update_token_bucket(config: TokenBucketConfig):
     token_bucket.capacity = config.capacity
     token_bucket.refill_rate = config.refill_rate
+
+    # Match the prefix used in RedisTokenBucketLimiter ("rl:tb:")
+    keys = redis_client.keys("rl:tb:*")
+    if keys:
+        redis_client.delete(*keys)
+
     return {"message": "Token bucket updated", "config": config}
 
 
@@ -54,4 +60,10 @@ def update_token_bucket(config: TokenBucketConfig):
 def update_sliding_window(config: SlidingWindowConfig):
     sliding_window.limit = config.limit
     sliding_window.window_seconds = config.window_seconds
+
+    # Match the prefix used in RedisSlidingWindowLimiter ("rl:sw:")
+    keys = redis_client.keys("rl:sw:*")
+    if keys:
+        redis_client.delete(*keys)
+
     return {"message": "Sliding window updated", "config": config}

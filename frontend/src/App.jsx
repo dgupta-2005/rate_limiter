@@ -26,13 +26,81 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
+  const [swRequests, setSwRequests] = useState([]);
 
-  // Countdown timer for 429 lockouts
+  // Live refill ticker: increments remaining tokens in real time for Token Bucket
+  useEffect(() => {
+    if (algo !== 'token_bucket') return;
+
+    const interval = setInterval(() => {
+      setRemaining((prev) => {
+        const cap = Number(capacity) || 5;
+        const rate = Number(refillRate) || 1;
+
+        if (prev < cap) {
+          const step = Math.max(1, Math.floor(rate / 2));
+          return Math.min(cap, prev + step);
+        }
+        return prev;
+      });
+    }, 1000 / Math.max(1, Math.min(Number(refillRate) || 1, 10)));
+
+    return () => clearInterval(interval);
+  }, [algo, capacity, refillRate]);
+
+  // Live meter update ticker for Sliding Window: purges expired requests outside rolling window
+  useEffect(() => {
+    if (algo !== 'sliding_window') return;
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const windowMs = (Number(windowSec) || 5) * 1000;
+      const max = Number(limit) || 5;
+
+      setSwRequests((prev) => {
+        const valid = prev.filter((t) => now - t < windowMs);
+        const activeCount = valid.length;
+        const newRemaining = Math.max(0, max - activeCount);
+
+        setRemaining(newRemaining);
+
+        return valid;
+      });
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [algo, windowSec, limit]);
+
+  // Sync capacity headroom and max limit when switching algorithms
+  useEffect(() => {
+    if (algo === 'token_bucket') {
+      const cap = Number(capacity) || 5;
+      setMaxLimit(cap);
+      setRemaining((prev) => Math.min(prev, cap));
+    } else if (algo === 'sliding_window') {
+      const max = Number(limit) || 5;
+      setMaxLimit(max);
+      const now = Date.now();
+      const windowMs = (Number(windowSec) || 5) * 1000;
+      const activeCount = swRequests.filter((t) => now - t < windowMs).length;
+      setRemaining(Math.max(0, max - activeCount));
+    }
+  }, [algo]);
+
+  // Live retry-after countdown ticker
   useEffect(() => {
     if (retryAfter <= 0) return;
+
     const timer = setInterval(() => {
-      setRetryAfter((prev) => Math.max(0, parseFloat((prev - 0.1).toFixed(1))));
-    }, 100);
+      setRetryAfter((prev) => {
+        if (prev <= 1) {
+          setRemaining((r) => (r === 0 ? 1 : r));
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
     return () => clearInterval(timer);
   }, [retryAfter]);
 
@@ -41,82 +109,137 @@ export default function App() {
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const sendRequest = async () => {
+  // Helper to execute a single ping and return its exact log item
+  const executePing = async () => {
     try {
+      const currentAlgo = algo;
       const res = await fetch('http://127.0.0.1:8000/api/ping', {
         method: 'GET',
-        headers: { 
-          'X-Algorithm': algo 
+        headers: {
+          'X-Algorithm': currentAlgo,
         },
       });
 
-      // Parse headers
-      const rem = res.headers.get('X-RateLimit-Remaining');
-      const lim = res.headers.get('X-RateLimit-Limit');
-      const retry = res.headers.get('Retry-After');
+      // Always consume response body so stream closes cleanly
+      await res.json().catch(() => ({}));
 
-      if (rem !== null) setRemaining(parseInt(rem, 10));
-      if (lim !== null) setMaxLimit(parseInt(lim, 10));
+      const limitHeader = res.headers.get('X-RateLimit-Limit');
+      const remHeader = res.headers.get('X-RateLimit-Remaining');
+      const retryHeader = res.headers.get('Retry-After');
 
-      if (res.status === 429) {
-        // Blocked by limiter!
-        const retrySeconds = retry ? parseFloat(retry) : 2.0;
+      const currentMax = limitHeader !== null 
+        ? parseInt(limitHeader, 10) 
+        : (currentAlgo === 'token_bucket' ? Number(capacity) : Number(limit));
+
+      setMaxLimit(currentMax);
+
+      const isBlocked = res.status === 429;
+      const retrySec = retryHeader ? Math.max(1, Math.ceil(parseFloat(retryHeader))) : 2;
+      const tokensLeft = remHeader !== null ? parseInt(remHeader, 10) : 0;
+
+      if (isBlocked) {
         setRemaining(0);
-        setRetryAfter(retrySeconds);
-
-        const newLog = {
-          id: Math.random().toString(36).substr(2, 9),
-          time: new Date().toLocaleTimeString(),
-          status: 429,
-          algo: algo === 'token_bucket' ? 'Token Bucket' : 'Sliding Window',
-          detail: `429 Blocked — Rate limit exceeded (Retry in ${retrySeconds}s)`,
-        };
-        setLogs((prev) => [newLog, ...prev.slice(0, 14)]);
-        return;
+        setRetryAfter(retrySec);
+      } else {
+        setRemaining(tokensLeft);
+        if (currentAlgo === 'sliding_window') {
+          const now = Date.now();
+          const windowMs = (Number(windowSec) || 5) * 1000;
+          setSwRequests((prev) => {
+            const valid = prev.filter((t) => now - t < windowMs);
+            const activeNeeded = Math.max(1, currentMax - tokensLeft);
+            const updated = [...valid, now];
+            while (updated.length < activeNeeded) {
+              updated.unshift(now);
+            }
+            while (updated.length > activeNeeded) {
+              updated.shift();
+            }
+            return updated;
+          });
+        }
       }
 
-      // If allowed (200 OK)
-      setRetryAfter(0);
-      const newLog = {
-        id: Math.random().toString(36).substr(2, 9),
+      return {
+        id: Math.random().toString(36).substring(2, 9),
         time: new Date().toLocaleTimeString(),
-        status: 200,
-        algo: algo === 'token_bucket' ? 'Token Bucket' : 'Sliding Window',
-        detail: `200 OK — Request allowed (${rem ?? 0} tokens left)`,
+        status: res.status, // 200 or 429
+        algo: currentAlgo === 'token_bucket' ? 'Token Bucket' : 'Sliding Window',
+        detail: isBlocked
+          ? `HTTP 429 — Rate limit exceeded (Retry in ${retrySec}s)`
+          : `HTTP 200 — Request allowed (${tokensLeft} ${currentAlgo === 'token_bucket' ? 'tokens' : 'slots'} left)`,
       };
-      setLogs((prev) => [newLog, ...prev.slice(0, 14)]);
-
     } catch (err) {
-      console.error('Fetch error:', err);
+      console.error('Request failed:', err);
+      return null;
     }
   };
 
-  const simulateBurst = async (count = 6) => {
-    setLoading(true);
-    await Promise.all(Array.from({ length: count }, () => sendRequest()));
-    setLoading(false);
+  // 1. Single Ping Handler
+  const sendRequest = async () => {
+    const entry = await executePing();
+    if (entry) {
+      setLogs((prev) => [entry, ...prev.slice(0, 14)]);
+    }
+  };
+
+  // 2. Burst Handler (Collects all results together so none get dropped)
+  const sendBurst = async () => {
+    const promises = Array.from({ length: 6 }).map(() => executePing());
+    const results = await Promise.all(promises);
+    const validEntries = results.filter(Boolean);
+
+    // Prepend all burst results at once into log history
+    setLogs((prev) => [...validEntries.reverse(), ...prev].slice(0, 15));
   };
 
   const applyConfig = async () => {
     try {
-      const endpoint = algo === 'token_bucket' 
-        ? 'http://127.0.0.1:8000/api/config/token-bucket' 
+      const isTokenBucket = algo === 'token_bucket';
+      const endpoint = isTokenBucket
+        ? 'http://127.0.0.1:8000/api/config/token-bucket'
         : 'http://127.0.0.1:8000/api/config/sliding-window';
 
-      const payload = algo === 'token_bucket'
+      const payload = isTokenBucket
         ? { capacity: Number(capacity), refill_rate: Number(refillRate) }
         : { limit: Number(limit), window_seconds: Number(windowSec) };
 
-      await fetch(endpoint, {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      setMaxLimit(algo === 'token_bucket' ? Number(capacity) : Number(limit));
-      showNotification('Configuration synced to Redis successfully.');
+      if (res.ok) {
+        const data = await res.json();
+        
+        // Read the actual limit from backend response
+        const newMax = isTokenBucket 
+          ? Number(data.config.capacity) 
+          : Number(data.config.limit);
+
+        // Instantly reset UI headroom to the new limit
+        setMaxLimit(newMax);
+        setRemaining(newMax);
+        setRetryAfter(0);
+        if (!isTokenBucket) {
+          setSwRequests([]);
+        }
+
+        showNotification(`Config updated: Limit reset to ${newMax}`);
+
+        // Add visual confirmation in the stream
+        const logEntry = {
+          id: Math.random().toString(36).substring(2, 9),
+          time: new Date().toLocaleTimeString(),
+          status: 200,
+          algo: isTokenBucket ? 'Token Bucket' : 'Sliding Window',
+          detail: `Config updated: Headroom reset to ${newMax}/${newMax}`,
+        };
+        setLogs((prev) => [logEntry, ...prev.slice(0, 14)]);
+      }
     } catch (err) {
-      console.error('Config sync error:', err);
+      console.error('Failed to update config:', err);
     }
   };
 
@@ -286,32 +409,34 @@ export default function App() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
               
               {/* BUTTON 1: SEND 1 PING */}
-              <button 
+              <button
                 className="btn-tactile"
                 onClick={sendRequest}
                 disabled={loading}
                 style={{
                   padding: '12px',
-                  backgroundColor: '#2563eb',
+                  backgroundColor: retryAfter > 0 ? '#ea580c' : '#2563eb',
                   color: '#ffffff',
                   border: 'none',
                   borderRadius: '8px',
                   fontSize: '13px',
                   fontWeight: 600,
+                  cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '8px',
-                  boxShadow: '0 4px 0 #1d4ed8, 0 6px 12px rgba(37,99,235,0.25)',
+                  transition: 'all 0.15s ease'
                 }}
               >
-                <Send size={15} /> Send 1 Ping
+                <Send size={15} />
+                {retryAfter > 0 ? `Send 1 Ping (${retryAfter}s)` : 'Send 1 Ping'}
               </button>
 
               {/* BUTTON 2: BURST */}
               <button 
                 className="btn-tactile"
-                onClick={() => simulateBurst(6)}
+                onClick={sendBurst}
                 disabled={loading}
                 style={{
                   padding: '12px',
@@ -344,7 +469,7 @@ export default function App() {
               <div style={{ fontSize: '32px', fontWeight: 800, margin: '8px 0', color: remaining > 0 ? '#0f172a' : '#ef4444' }}>
                 {remaining} <span style={{ fontSize: '16px', fontWeight: 500, color: '#94a3b8' }}>/ {maxLimit}</span>
               </div>
-              <div style={{ height: '6px', backgroundColor: '#f1f5f9', borderRadius: '10px', overflow: 'hidden' }}>
+              <div style={{ height: '6px', backgroundColor: '#f1f5f9', borderRadius: '10px', overflow: 'hidden', marginBottom: '8px' }}>
                 <div 
                   style={{ 
                     height: '100%', 
@@ -354,6 +479,9 @@ export default function App() {
                   }} 
                 />
               </div>
+              <span style={{ fontSize: '11px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Clock size={11} /> {algo === 'token_bucket' ? `Refills at ${refillRate} token/s` : `Rolling ${windowSec}s window expiry`}
+              </span>
             </div>
 
             <div style={{ backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
