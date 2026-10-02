@@ -29,13 +29,19 @@ sliding_window = RedisSlidingWindowLimiter(redis_client=redis_client, limit=5, w
 class RateLimiterMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         # 1. Skip rate limiting for docs, schema, and health checks
-        if ( request.url.path in ["/docs", "/openapi.json", "/health", "/favicon.ico"]
-            or request.url.path.startswith("/api/config")  # Allow config endpoints without rate limiting
-            ):
+        if (
+            request.method == "OPTIONS"
+            or request.url.path in ["/docs", "/openapi.json", "/health", "/favicon.ico"]
+            or request.url.path.startswith("/api/config")
+        ):
             return await call_next(request)
-
         # 2. Extract Client Identifier (API Key header or client IP)
-        client_ip = request.client.host if request.client else "127.0.0.1"
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        else:
+            client_ip = request.client.host if request.client else "127.0.0.1"
+
         client_id = request.headers.get("X-API-Key", client_ip)
 
         # 3. Choose algorithm via header (default: token_bucket)

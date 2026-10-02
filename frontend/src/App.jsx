@@ -197,8 +197,8 @@ export default function App() {
     try {
       const isTokenBucket = algo === 'token_bucket';
       const endpoint = isTokenBucket
-        ? 'http://127.0.0.1:8000/api/config/token-bucket'
-        : 'http://127.0.0.1:8000/api/config/sliding-window';
+      ? 'https://rate-limiter-api.duckdns.org/api/config/token-bucket'
+      : 'https://rate-limiter-api.duckdns.org/api/config/sliding-window';
 
       const payload = isTokenBucket
         ? { capacity: Number(capacity), refill_rate: Number(refillRate) }

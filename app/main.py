@@ -5,15 +5,15 @@ from app.middleware import RateLimiterMiddleware, token_bucket, sliding_window, 
 from typing import Optional
 
 app = FastAPI(title="Rate Limiter Core")
-
+origins=[
+    "https://main.d16wktw391ay2s.amplifyapp.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+],
 # Enable CORS for React frontend (allow exposed headers so frontend can read them)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://main.d16wktw391ay2s.amplifyapp.com",
-        "http://localhost:5173",
-        "*"
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
